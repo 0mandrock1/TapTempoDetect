@@ -1,0 +1,5 @@
+{
+  "name": "Remix: TempoTap BPM",
+  "description": "A high-precision BPM tap tempo tool with visual feedback and genre detection. Also gets info from microphone and tries to detect tempo by itself",
+  "requestFramePermissions": ["microphone"]
+}
