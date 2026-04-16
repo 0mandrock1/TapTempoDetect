@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { RefreshCw, Zap, Activity, Music, Mic, MicOff } from 'lucide-react';
+import { RefreshCw, Zap, Activity, Music, Mic, MicOff, Settings, Smartphone } from 'lucide-react';
 
 // Constants
 const MAX_TAPS = 8;
@@ -74,6 +74,8 @@ export default function App() {
   const [intervals, setIntervals] = useState<number[]>([]);
   const [isPulsing, setIsPulsing] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [hapticsEnabled, setHapticsEnabled] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -81,6 +83,7 @@ export default function App() {
   const animationFrameRef = useRef<number | null>(null);
   const lastPeakTime = useRef<number>(0);
   const energyHistory = useRef<number[]>([]);
+  const peakEnergyRef = useRef<number>(0);
   const lastTapTime = useRef<number>(0);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -90,16 +93,25 @@ export default function App() {
     setStability(100);
     setIntervals([]);
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-  }, []);
+    
+    // Also stop listening if it was active
+    if (isListening) {
+      toggleListening();
+    }
+  }, [isListening]);
 
-  const handleTap = useCallback(() => {
+  const handleTap = useCallback((isManual: boolean = true) => {
+    // Exclusivity: Ignore manual taps if listening, and ignore mic taps if manual mode is locked
+    if (isManual && isListening) return;
+    if (!isManual && !isListening) return;
+
     const now = performance.now();
     
     // Debounce accidental double taps
     if (now - lastTapTime.current < DEBOUNCE_TIME) return;
 
     // Haptic feedback
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+    if (hapticsEnabled && typeof navigator !== 'undefined' && navigator.vibrate) {
       navigator.vibrate(10);
     }
 
@@ -156,6 +168,9 @@ export default function App() {
       return;
     }
 
+    // Only allow starting if BPM is 0 (Reset state)
+    if (bpm > 0) return;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -166,7 +181,7 @@ export default function App() {
 
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 2048;
+      analyser.fftSize = 1024; // Smaller FFT for faster response
       source.connect(analyser);
       analyserRef.current = analyser;
 
@@ -180,28 +195,34 @@ export default function App() {
         if (!analyserRef.current) return;
         analyserRef.current.getByteFrequencyData(dataArray);
 
-        // Focus on low frequencies (bass/kick) for beat detection
-        // Typically 20Hz to 150Hz
-        const lowFreqRange = Math.floor((150 / (audioContext.sampleRate / 2)) * bufferLength);
+        // Refined frequency range: 40Hz to 120Hz (Kick drum territory)
+        const lowFreqStart = Math.floor((40 / (audioContext.sampleRate / 2)) * bufferLength);
+        const lowFreqEnd = Math.floor((120 / (audioContext.sampleRate / 2)) * bufferLength);
+        
         let energy = 0;
-        for (let i = 0; i < lowFreqRange; i++) {
+        for (let i = lowFreqStart; i < lowFreqEnd; i++) {
           energy += dataArray[i];
         }
-        energy /= lowFreqRange;
+        energy /= (lowFreqEnd - lowFreqStart || 1);
 
-        // Keep a short history to calculate moving average
+        // Dynamic thresholding
         energyHistory.current.push(energy);
-        if (energyHistory.current.length > 20) {
-          energyHistory.current.shift();
-        }
-
+        if (energyHistory.current.length > 30) energyHistory.current.shift();
+        
         const avgEnergy = energyHistory.current.reduce((a, b) => a + b, 0) / energyHistory.current.length;
         const now = performance.now();
 
-        // Threshold detection: energy must be significantly higher than average
-        // and we need a minimum time between peaks (e.g., 250ms for max 240 BPM)
-        if (energy > avgEnergy * 1.5 && energy > 30 && now - lastPeakTime.current > 250) {
-          handleTap();
+        // Peak detection with decay
+        if (energy > peakEnergyRef.current) {
+          peakEnergyRef.current = energy;
+        } else {
+          peakEnergyRef.current *= 0.98; // Decay
+        }
+
+        // Trigger beat if energy is high enough relative to average and peak
+        const threshold = Math.max(avgEnergy * 1.6, 40);
+        if (energy > threshold && energy > peakEnergyRef.current * 0.85 && now - lastPeakTime.current > 280) {
+          handleTap(false);
           lastPeakTime.current = now;
         }
 
@@ -214,7 +235,7 @@ export default function App() {
       setMicError("Microphone access denied or not available.");
       setIsListening(false);
     }
-  }, [isListening, handleTap]);
+  }, [isListening, handleTap, bpm]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -258,22 +279,74 @@ export default function App() {
 
       {/* Mic Toggle */}
       <div className="absolute top-8 right-8 z-30 flex flex-col items-end gap-2">
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleListening();
-          }}
-          className={`p-4 rounded-full backdrop-blur-md border transition-all duration-500 ${
-            isListening 
-              ? 'bg-red-500/20 border-red-500/50 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.3)]' 
-              : 'bg-white/10 border-white/20 text-white/60 hover:text-white'
-          }`}
-          title={isListening ? "Stop Listening" : "Start Listening"}
-        >
-          {isListening ? <Mic className="w-6 h-6 animate-pulse" /> : <MicOff className="w-6 h-6" />}
-        </motion.button>
+        <div className="flex gap-2">
+          {/* Settings Toggle */}
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowSettings(!showSettings);
+            }}
+            className={`p-4 rounded-full backdrop-blur-md border transition-all duration-500 ${
+              showSettings 
+                ? 'bg-white/30 border-white/50 text-white' 
+                : 'bg-white/10 border-white/20 text-white/60 hover:text-white'
+            }`}
+          >
+            <Settings className="w-6 h-6" />
+          </motion.button>
+
+          {/* Mic Toggle */}
+          <motion.button
+            whileHover={{ scale: (bpm > 0 && !isListening) ? 1 : 1.05 }}
+            whileTap={{ scale: (bpm > 0 && !isListening) ? 1 : 0.95 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleListening();
+            }}
+            disabled={bpm > 0 && !isListening}
+            className={`p-4 rounded-full backdrop-blur-md border transition-all duration-500 ${
+              isListening 
+                ? 'bg-red-500/20 border-red-500/50 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.3)]' 
+                : (bpm > 0 && !isListening)
+                  ? 'bg-white/5 border-white/10 text-white/20 cursor-not-allowed'
+                  : 'bg-white/10 border-white/20 text-white/60 hover:text-white'
+            }`}
+            title={isListening ? "Stop Listening" : (bpm > 0 ? "Reset to enable Mic" : "Start Listening")}
+          >
+            {isListening ? <Mic className="w-6 h-6 animate-pulse" /> : <MicOff className="w-6 h-6" />}
+          </motion.button>
+        </div>
+
+        {/* Settings Panel */}
+        <AnimatePresence>
+          {showSettings && (
+            <motion.div
+              initial={{ opacity: 0, y: -10, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -10, scale: 0.95 }}
+              className="mt-2 p-4 rounded-2xl bg-black/40 backdrop-blur-xl border border-white/10 flex flex-col gap-4 min-w-[200px]"
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold uppercase tracking-widest">Haptics</span>
+                  <span className="text-[8px] opacity-40 uppercase">Vibrate on tap</span>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHapticsEnabled(!hapticsEnabled);
+                  }}
+                  className={`p-2 rounded-lg transition-colors ${hapticsEnabled ? 'bg-white/20 text-white' : 'bg-white/5 text-white/30'}`}
+                >
+                  <Smartphone className={`w-4 h-4 ${!hapticsEnabled && 'opacity-50'}`} />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {isListening && (
           <motion.div 
             initial={{ opacity: 0, x: 10 }}
@@ -417,9 +490,10 @@ export default function App() {
 
       {/* Large Tap Area */}
       <button
-        onClick={handleTap}
+        onClick={() => handleTap(true)}
         onMouseDown={(e) => e.preventDefault()} // Prevent focus ring on click
-        className="absolute inset-0 w-full h-full cursor-pointer appearance-none bg-transparent border-none outline-none z-0 active:bg-white/5 transition-colors"
+        disabled={isListening}
+        className={`absolute inset-0 w-full h-full cursor-pointer appearance-none bg-transparent border-none outline-none z-0 transition-colors ${isListening ? 'cursor-not-allowed' : 'active:bg-white/5'}`}
         aria-label="Tap Tempo"
       >
         {/* Visual Pulse Overlay */}
